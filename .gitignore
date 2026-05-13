@@ -1,0 +1,30 @@
+# Build outputs
+Debug/
+Release/
+build/
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+*.o
+*.d
+*.su
+
+# STM32CubeIDE / Eclipse metadata
+.settings/
+.project
+.cproject
+.classpath
+*.launch
+
+# Generated or local-only files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
