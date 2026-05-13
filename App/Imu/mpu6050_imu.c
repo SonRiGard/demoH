@@ -3,8 +3,17 @@
 #include <math.h>
 #include <string.h>
 
+/* Minimal MPU6050/compatible IMU driver used by the MAVLink app.
+   The module owns all sensor state, keeps I2C access in one place, and exposes
+   only two outputs: filtered attitude and simple debug counters/raw values. */
+
+/* MPU devices use a 7-bit address on the bus. STM32 HAL expects that address
+   shifted left by one bit, so 0x68 becomes 0xD0 and 0x69 becomes 0xD2. */
 #define MPU6050_ADDR_AD0_LOW       (0x68U << 1)
 #define MPU6050_ADDR_AD0_HIGH      (0x69U << 1)
+
+/* Register map entries used by this driver. They are kept here instead of a
+   separate header because only this C file should touch sensor registers. */
 #define MPU6050_REG_SMPLRT_DIV     0x19U
 #define MPU6050_REG_CONFIG         0x1AU
 #define MPU6050_REG_GYRO_CONFIG    0x1BU
@@ -17,6 +26,9 @@
 #define MPU6050_CALIB_SAMPLES      200U
 #define MPU6050_UPDATE_PERIOD_MS   10U
 
+/* Full-scale settings configured below:
+   accel +/-2g => 16384 LSB/g
+   gyro +/-250 deg/s => 131 LSB/(deg/s) */
 #define ACCEL_SCALE_LSB_G          16384.0f
 #define GYRO_SCALE_LSB_DPS         131.0f
 #define DEG_TO_RAD                 0.017453292519943295f
@@ -24,6 +36,8 @@
 
 typedef struct
 {
+  /* 1D Kalman state for one angle axis. The filter estimates angle and gyro
+     bias. Accel gives a noisy absolute angle; gyro gives smooth short-term rate. */
   float q_angle;
   float q_bias;
   float r_measure;
@@ -36,6 +50,8 @@ typedef struct
 {
   I2C_HandleTypeDef *hi2c;
   uint16_t addr;
+  /* Biases are stored in raw sensor units so the subtraction happens before
+     converting to g or deg/s. */
   int16_t accel_bias_raw[3];
   int16_t gyro_bias_raw[3];
   Kalman1D roll_filter;
@@ -48,6 +64,8 @@ typedef struct
 
 static Mpu6050ImuState s_imu;
 
+/* Read a register block and mirror the HAL status into debug telemetry.
+   This makes I2C errors visible in QGC through MPU_ERR. */
 static HAL_StatusTypeDef read_reg(uint8_t reg, uint8_t *data, uint16_t len)
 {
   HAL_StatusTypeDef status = HAL_I2C_Mem_Read(s_imu.hi2c, s_imu.addr, reg, I2C_MEMADD_SIZE_8BIT,
@@ -56,6 +74,7 @@ static HAL_StatusTypeDef read_reg(uint8_t reg, uint8_t *data, uint16_t len)
   return status;
 }
 
+/* Write one register and keep the last HAL status for field debugging. */
 static HAL_StatusTypeDef write_reg(uint8_t reg, uint8_t data)
 {
   HAL_StatusTypeDef status = HAL_I2C_Mem_Write(s_imu.hi2c, s_imu.addr, reg, I2C_MEMADD_SIZE_8BIT,
@@ -64,11 +83,15 @@ static HAL_StatusTypeDef write_reg(uint8_t reg, uint8_t data)
   return status;
 }
 
+/* MPU6050 outputs high byte first. Convert two bytes from the burst-read buffer
+   to the signed 16-bit value used by accel/gyro registers. */
 static int16_t read_i16_be(const uint8_t *data)
 {
   return (int16_t)(((uint16_t)data[0] << 8) | data[1]);
 }
 
+/* Start the Kalman filter from the current accelerometer angle so the first
+   transmitted attitude does not jump from zero to the measured pose. */
 static void kalman_init(Kalman1D *filter, float initial_angle_deg)
 {
   memset(filter, 0, sizeof(*filter));
@@ -78,6 +101,9 @@ static void kalman_init(Kalman1D *filter, float initial_angle_deg)
   filter->angle = initial_angle_deg;
 }
 
+/* Fuse accelerometer angle with gyro rate for one axis.
+   Prediction step: integrate gyro rate after subtracting estimated gyro bias.
+   Correction step: pull the predicted angle toward the accelerometer angle. */
 static float kalman_update(Kalman1D *filter, float angle_deg, float rate_deg_s, float dt_s)
 {
   float rate = rate_deg_s - filter->bias;
@@ -108,6 +134,9 @@ static float kalman_update(Kalman1D *filter, float angle_deg, float rate_deg_s, 
   return filter->angle;
 }
 
+/* Probe both possible AD0 strap addresses and accept common compatible WHO_AM_I
+   values. The user's board reports 0x70, which is typical for MPU6500-style
+   compatible parts, while many MPU6050 modules report 0x68. */
 static uint8_t detect_device(void)
 {
   uint8_t who_am_i = 0U;
@@ -141,6 +170,8 @@ static uint8_t read_raw(int16_t accel[3], int16_t gyro[3])
 {
   uint8_t data[14];
 
+  /* ACCEL_XOUT_H starts a contiguous 14-byte block:
+     accel XYZ, temperature, then gyro XYZ. Temperature is skipped here. */
   if (read_reg(MPU6050_REG_ACCEL_XOUT_H, data, sizeof(data)) != HAL_OK)
   {
     return 0U;
@@ -172,6 +203,8 @@ static void calibrate(void)
 
   for (uint32_t i = 0U; i < MPU6050_CALIB_SAMPLES; i++)
   {
+    /* Calibration assumes the board is stationary. Averaging many samples removes
+       constant offset, but it cannot compensate if the board is moving at boot. */
     if (read_raw(accel, gyro) != 0U)
     {
       accel_sum[0] += accel[0];
@@ -190,6 +223,8 @@ static void calibrate(void)
     return;
   }
 
+  /* X/Y accel bias should average around zero when stationary. Z includes gravity,
+     so remove 1g from the bias to keep gravity available for roll/pitch angles. */
   s_imu.accel_bias_raw[0] = (int16_t)(accel_sum[0] / (int32_t)sample_count);
   s_imu.accel_bias_raw[1] = (int16_t)(accel_sum[1] / (int32_t)sample_count);
   s_imu.accel_bias_raw[2] = (int16_t)((accel_sum[2] / (int32_t)sample_count) - (int32_t)ACCEL_SCALE_LSB_G);
@@ -216,6 +251,8 @@ uint8_t Mpu6050Imu_Init(I2C_HandleTypeDef *hi2c)
     return 0U;
   }
 
+  /* Wake the sensor and select conservative default full-scale ranges:
+     DLPF enabled, sample divider 7, accel +/-2g, gyro +/-250 deg/s. */
   if ((write_reg(MPU6050_REG_PWR_MGMT_1, 0x00U) != HAL_OK) ||
       (write_reg(MPU6050_REG_CONFIG, 0x03U) != HAL_OK) ||
       (write_reg(MPU6050_REG_SMPLRT_DIV, 0x07U) != HAL_OK) ||
@@ -233,6 +270,9 @@ uint8_t Mpu6050Imu_Init(I2C_HandleTypeDef *hi2c)
     return 0U;
   }
 
+  /* Seed roll/pitch from accelerometer geometry:
+     roll = rotation around X from Y/Z gravity projection
+     pitch = rotation around Y from X and horizontal gravity magnitude */
   float ax = ((float)accel[0] - (float)s_imu.accel_bias_raw[0]);
   float ay = ((float)accel[1] - (float)s_imu.accel_bias_raw[1]);
   float az = ((float)accel[2] - (float)s_imu.accel_bias_raw[2]);
@@ -261,11 +301,15 @@ void Mpu6050Imu_Tick(void)
 
   if ((s_imu.ready == 0U) || ((now - s_imu.last_update_ms) < MPU6050_UPDATE_PERIOD_MS))
   {
+    /* Called faster than the configured IMU rate. Return immediately so the main
+       loop can keep servicing USB and other tasks. */
     return;
   }
 
   if (read_raw(accel_raw, gyro_raw) == 0U)
   {
+    /* Keep the previous attitude values, but mark them invalid so MAVLink can
+       fall back to deterministic fake values instead of sending stale real data. */
     s_imu.attitude.valid = 0U;
     s_imu.debug.read_ok = 0U;
     return;
@@ -274,6 +318,8 @@ void Mpu6050Imu_Tick(void)
   float dt_s = (float)(now - s_imu.last_update_ms) / 1000.0f;
   s_imu.last_update_ms = now;
 
+  /* Remove measured biases before converting units. Accel values are left in raw
+     LSB here because atan2f only needs ratios, not absolute g units. */
   float ax_raw = (float)accel_raw[0] - (float)s_imu.accel_bias_raw[0];
   float ay_raw = (float)accel_raw[1] - (float)s_imu.accel_bias_raw[1];
   float az_raw = (float)accel_raw[2] - (float)s_imu.accel_bias_raw[2];
@@ -285,6 +331,8 @@ void Mpu6050Imu_Tick(void)
   float roll_acc_deg = atan2f(ay_raw, az_raw) * RAD_TO_DEG;
   float pitch_acc_deg = atan2f(-ax_raw, sqrtf((ay_raw * ay_raw) + (az_raw * az_raw))) * RAD_TO_DEG;
 
+  /* Roll and pitch are observable from gravity, so they can be corrected by the
+     accelerometer. Yaw cannot be corrected with MPU6050 alone and will drift. */
   float roll_deg = kalman_update(&s_imu.roll_filter, roll_acc_deg, gx_deg_s, dt_s);
   float pitch_deg = kalman_update(&s_imu.pitch_filter, pitch_acc_deg, gy_deg_s, dt_s);
 
@@ -305,6 +353,8 @@ uint8_t Mpu6050Imu_GetAttitude(Mpu6050Attitude *attitude)
     return 0U;
   }
 
+  /* Return a copy, not a pointer to module state. This keeps callers from
+     accidentally modifying filter output while the next Tick is running. */
   *attitude = s_imu.attitude;
   return s_imu.attitude.valid;
 }
@@ -316,5 +366,6 @@ void Mpu6050Imu_GetDebug(Mpu6050Debug *debug)
     return;
   }
 
+  /* Debug is also copied by value so MAVLink can format it safely. */
   *debug = s_imu.debug;
 }

@@ -5,6 +5,14 @@
 #include "main.h"
 #include "usbd_cdc_if.h"
 
+/* This file implements only the small MAVLink v2 subset needed for QGroundControl
+   to show the board online and display attitude/debug values over USB CDC.
+   A generated MAVLink library would be more complete, but this manual encoder
+   keeps the firmware small and avoids adding a large generated dependency. */
+
+/* MAVLink v2 message IDs, payload lengths and CRC-extra values.
+   The CRC-extra byte is message-specific; if it is wrong, QGC will silently drop
+   the frame even when the payload bytes look correct on a serial monitor. */
 #define MAVLINK_STX_V2              0xFDU
 #define MAVLINK_MSG_ID_HEARTBEAT    0U
 #define MAVLINK_MSG_LEN_HEARTBEAT    9U
@@ -21,6 +29,8 @@
 #define MAVLINK_V2_HEADER_LEN       10U
 #define MAVLINK_V2_CRC_INPUT_LEN    (MAVLINK_V2_HEADER_LEN - 1U)
 
+/* Minimal system identity. QGC only needs HEARTBEAT with a stable sysid/compid
+   to mark this endpoint online. */
 #define MAV_TYPE_GENERIC             0U
 #define MAV_AUTOPILOT_GENERIC        0U
 #define MAV_COMP_ID_AUTOPILOT1       1U
@@ -28,9 +38,14 @@
 #define MAV_STATE_ACTIVE             4U
 #define MAVLINK_VERSION_FIELD        3U
 
+/* Scheduling periods. HEARTBEAT is 1 Hz per MAVLink convention; ATTITUDE is sent
+   at 10 Hz so moving the IMU is visible without flooding USB CDC. */
 #define HEARTBEAT_PERIOD_MS       1000U
 #define ATTITUDE_PERIOD_MS         100U
 #define DEBUG_PERIOD_MS           1000U
+
+/* Deterministic fallback angles. They are used only if the IMU is absent or the
+   latest IMU read failed, so QGC still shows a valid ATTITUDE stream for testing. */
 #define FAKE_ROLL_RAD              0.174533f
 #define FAKE_PITCH_RAD            -0.087266f
 #define FAKE_YAW_RAD               0.523599f
@@ -63,11 +78,16 @@ static uint8_t s_seq = 0U;
 static uint32_t s_last_heartbeat_ms = 0U;
 static uint32_t s_last_attitude_ms = 0U;
 static uint32_t s_last_debug_ms = 0U;
+/* USB CDC transmit is asynchronous: CDC_Transmit_FS returns before the USB stack
+   finishes reading the buffer. A small ring keeps outgoing MAVLink frames alive
+   long enough and avoids reusing the same memory immediately. */
 static uint8_t s_tx_buffers[4][64];
 static uint8_t s_tx_buffer_index = 0U;
 static uint8_t s_imu_ready = 0U;
 static uint8_t s_boot_status_sent = 0U;
 
+/* X.25/MAVLink CRC accumulate function. MAVLink v1/v2 use this same algorithm;
+   v2 changes the frame header but not the checksum primitive. */
 static uint16_t crc_accumulate(uint8_t data, uint16_t crc)
 {
   uint8_t tmp;
@@ -95,6 +115,8 @@ static uint16_t crc_calculate(const uint8_t *buffer, uint16_t length)
 
 static void put_u32_le(uint8_t *dst, uint32_t value)
 {
+  /* MAVLink payload fields are little-endian on the wire. Write bytes manually so
+     the frame is independent of compiler packing/alignment rules. */
   dst[0] = (uint8_t)(value & 0xFFU);
   dst[1] = (uint8_t)((value >> 8) & 0xFFU);
   dst[2] = (uint8_t)((value >> 16) & 0xFFU);
@@ -103,6 +125,8 @@ static void put_u32_le(uint8_t *dst, uint32_t value)
 
 static void put_float_le(uint8_t *dst, float value)
 {
+  /* STM32H743 uses IEEE-754 float. Reinterpret as uint32_t, then reuse the
+     little-endian integer writer above. */
   union
   {
     float f;
@@ -142,6 +166,9 @@ static uint16_t mavlink_frame_build(uint8_t *out,
   uint16_t crc;
   uint16_t index = 0U;
 
+  /* MAVLink v2 frame layout:
+     STX, LEN, incompat_flags, compat_flags, SEQ, SYSID, COMPID,
+     24-bit MSGID, PAYLOAD, CRC_L, CRC_H. No signature is used here. */
   out[index++] = MAVLINK_STX_V2;
   out[index++] = payload_len;
   out[index++] = 0U;
@@ -158,6 +185,8 @@ static uint16_t mavlink_frame_build(uint8_t *out,
     out[index++] = payload[i];
   }
 
+  /* CRC starts at LEN, excludes STX, includes payload and the message-specific
+     CRC-extra byte. The CRC bytes themselves are appended after calculation. */
   crc = crc_calculate(&out[1], MAVLINK_V2_CRC_INPUT_LEN);
   for (uint16_t i = 0U; i < payload_len; i++)
   {
@@ -175,6 +204,8 @@ static uint16_t mavlink_heartbeat_build(uint8_t *out, const MavlinkConfig *cfg)
 {
   uint8_t payload[MAVLINK_MSG_LEN_HEARTBEAT];
 
+  /* HEARTBEAT payload order follows MAVLink common.xml exactly:
+     custom_mode, type, autopilot, base_mode, system_status, mavlink_version. */
   put_u32_le(&payload[0], cfg->custom_mode);
   payload[4] = cfg->type;
   payload[5] = cfg->autopilot;
@@ -201,6 +232,7 @@ static uint16_t mavlink_attitude_build(uint8_t *out, const MavlinkConfig *cfg,
 
   if ((attitude != NULL) && (attitude->valid != 0U))
   {
+    /* Prefer real IMU data whenever the latest sample is valid. */
     time_boot_ms = attitude->time_boot_ms;
     roll_rad = attitude->roll_rad;
     pitch_rad = attitude->pitch_rad;
@@ -210,6 +242,8 @@ static uint16_t mavlink_attitude_build(uint8_t *out, const MavlinkConfig *cfg,
     yaw_rate_rad_s = attitude->yaw_rate_rad_s;
   }
 
+  /* ATTITUDE payload uses radians and rad/s. MPU module already exposes those
+     units, so no unit conversion is done in this MAVLink layer. */
   put_u32_le(&payload[0], time_boot_ms);
   put_float_le(&payload[4], roll_rad);
   put_float_le(&payload[8], pitch_rad);
@@ -228,6 +262,8 @@ static uint16_t mavlink_named_value_float_build(uint8_t *out, const MavlinkConfi
 {
   uint8_t payload[MAVLINK_MSG_LEN_NAMED_VALUE_FLOAT];
 
+  /* NAMED_VALUE_FLOAT is useful for quick QGC inspection without a custom dialect.
+     Names are limited to 10 bytes by MAVLink common.xml. */
   put_u32_le(&payload[0], HAL_GetTick());
   put_float_le(&payload[4], value);
   put_name_10(&payload[8], name);
@@ -242,6 +278,8 @@ static uint16_t mavlink_statustext_build(uint8_t *out, const MavlinkConfig *cfg,
 {
   uint8_t payload[MAVLINK_MSG_LEN_STATUSTEXT] = {0};
 
+  /* STATUSTEXT is sent once after USB is ready. If QGC connects late it may miss
+     this message, so periodic NAMED_VALUE_FLOAT telemetry also exposes status. */
   payload[0] = MAV_SEVERITY_INFO;
   for (uint32_t i = 0U; (i < 50U) && (text != NULL) && (text[i] != '\0'); i++)
   {
@@ -268,6 +306,8 @@ static uint8_t *mavlink_next_tx_buffer(void)
 
 void MavlinkApp_Init(I2C_HandleTypeDef *hi2c)
 {
+  /* Backdate timestamps so the first Tick can send all initial streams promptly
+     instead of waiting a full period after boot. */
   s_seq = 0U;
   s_last_heartbeat_ms = HAL_GetTick() - s_cfg.period_ms;
   s_last_attitude_ms = HAL_GetTick() - ATTITUDE_PERIOD_MS;
@@ -287,6 +327,8 @@ void MavlinkApp_Tick(void)
 
   if (s_imu_ready != 0U)
   {
+    /* Update IMU before deciding which ATTITUDE source to send. If the read fails,
+       attitude_ptr remains NULL and the builder sends deterministic fake values. */
     Mpu6050Imu_Tick();
     if (Mpu6050Imu_GetAttitude(&attitude) != 0U)
     {
@@ -296,6 +338,8 @@ void MavlinkApp_Tick(void)
 
   if (CDC_IsTransmitReady_FS() == 0U)
   {
+    /* Do not queue another frame while the previous USB IN transfer is active.
+       The next main-loop pass will retry according to the same timers. */
     return;
   }
 
@@ -303,6 +347,8 @@ void MavlinkApp_Tick(void)
 
   if (s_boot_status_sent == 0U)
   {
+    /* First visible message after USB enumeration: tells the operator whether the
+       IMU was found during init. */
     tx_buffer = mavlink_next_tx_buffer();
     frame_len = mavlink_statustext_build(tx_buffer, &s_cfg,
                                          (s_imu_ready != 0U) ? "MPU6050 OK" : "MPU6050 FAIL");
@@ -315,6 +361,7 @@ void MavlinkApp_Tick(void)
 
   if ((now - s_last_heartbeat_ms) >= s_cfg.period_ms)
   {
+    /* HEARTBEAT keeps QGC showing the vehicle/system as online. */
     tx_buffer = mavlink_next_tx_buffer();
     frame_len = mavlink_heartbeat_build(tx_buffer, &s_cfg);
     if (CDC_Transmit_FS(tx_buffer, frame_len) == USBD_OK)
@@ -326,6 +373,8 @@ void MavlinkApp_Tick(void)
 
   if ((now - s_last_attitude_ms) >= ATTITUDE_PERIOD_MS)
   {
+    /* ATTITUDE is sent after heartbeat priority. It uses real MPU data if valid,
+       otherwise known fake data so the USB/MAVLink path remains testable. */
     tx_buffer = mavlink_next_tx_buffer();
     frame_len = mavlink_attitude_build(tx_buffer, &s_cfg, attitude_ptr);
     if (CDC_Transmit_FS(tx_buffer, frame_len) == USBD_OK)
@@ -337,6 +386,9 @@ void MavlinkApp_Tick(void)
 
   if ((now - s_last_debug_ms) >= DEBUG_PERIOD_MS)
   {
+    /* Rotate one debug value per second to keep traffic low while still exposing
+       the important bring-up checks in QGC: ready flag, WHO_AM_I, address,
+       last HAL error, raw accel and raw gyro Z. */
     static uint8_t debug_index = 0U;
     const char *name = "MPU_RDY";
     float value = (float)imu_debug.ready;

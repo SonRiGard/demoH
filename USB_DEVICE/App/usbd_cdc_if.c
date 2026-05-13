@@ -282,16 +282,24 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len)
 {
   uint8_t result = USBD_OK;
   /* USER CODE BEGIN 7 */
+  /* QGC/host may not have enumerated the USB device yet. In that state the CDC
+     class data is not valid and attempting to transmit can fail unpredictably. */
   if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED)
   {
     return USBD_FAIL;
   }
 
   USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceFS.pClassData;
+  /* STM32 USB CDC transmit is asynchronous. TxState != 0 means the previous
+     packet is still owned by the USB stack, so report busy instead of replacing
+     its buffer. */
   if ((hcdc == NULL) || (hcdc->TxState != 0))
   {
     return USBD_BUSY;
   }
+
+  /* The caller must keep Buf valid until transmit complete. MavlinkApp does that
+     with a small ring of static frame buffers. */
   USBD_CDC_SetTxBuffer(&hUsbDeviceFS, Buf, Len);
   result = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
   /* USER CODE END 7 */
@@ -326,6 +334,8 @@ uint8_t CDC_IsTransmitReady_FS(void)
 {
   USBD_CDC_HandleTypeDef *hcdc;
 
+  /* Helper for application scheduling: only return ready when the USB device is
+     configured and the class driver is not currently transmitting. */
   if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED)
   {
     return 0U;

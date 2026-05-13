@@ -109,6 +109,9 @@ extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
 uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
 
 /* USER CODE BEGIN EXPORTED_FUNCTIONS */
+/* Returns 1 only when USB is enumerated and the previous CDC IN transfer is done.
+   Application code uses this before CDC_Transmit_FS to avoid overwriting an
+   in-flight transmit buffer. */
 uint8_t CDC_IsTransmitReady_FS(void);
 
 /* USER CODE END EXPORTED_FUNCTIONS */

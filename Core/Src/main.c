@@ -95,6 +95,8 @@ int main(void)
   MX_GPIO_Init();
   MX_I2C1_Init();
   MX_USB_DEVICE_Init();
+  /* MavlinkApp owns MPU init/calibration and USB MAVLink scheduling. Keep the
+     board still for a short moment after boot so IMU bias calibration is valid. */
   MavlinkApp_Init(&hi2c1);
   /* USER CODE BEGIN 2 */
 
@@ -107,6 +109,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* Service MAVLink frequently. The function is non-blocking and internally
+       rate-limits HEARTBEAT, ATTITUDE and debug messages. */
     MavlinkApp_Tick();
     HAL_Delay(5);
   }
