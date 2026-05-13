@@ -41,6 +41,7 @@ typedef struct
   Kalman1D roll_filter;
   Kalman1D pitch_filter;
   Mpu6050Attitude attitude;
+  Mpu6050Debug debug;
   uint32_t last_update_ms;
   uint8_t ready;
 } Mpu6050ImuState;
@@ -49,14 +50,18 @@ static Mpu6050ImuState s_imu;
 
 static HAL_StatusTypeDef read_reg(uint8_t reg, uint8_t *data, uint16_t len)
 {
-  return HAL_I2C_Mem_Read(s_imu.hi2c, s_imu.addr, reg, I2C_MEMADD_SIZE_8BIT,
-                          data, len, MPU6050_I2C_TIMEOUT_MS);
+  HAL_StatusTypeDef status = HAL_I2C_Mem_Read(s_imu.hi2c, s_imu.addr, reg, I2C_MEMADD_SIZE_8BIT,
+                                              data, len, MPU6050_I2C_TIMEOUT_MS);
+  s_imu.debug.last_error = (uint8_t)status;
+  return status;
 }
 
 static HAL_StatusTypeDef write_reg(uint8_t reg, uint8_t data)
 {
-  return HAL_I2C_Mem_Write(s_imu.hi2c, s_imu.addr, reg, I2C_MEMADD_SIZE_8BIT,
-                           &data, 1U, MPU6050_I2C_TIMEOUT_MS);
+  HAL_StatusTypeDef status = HAL_I2C_Mem_Write(s_imu.hi2c, s_imu.addr, reg, I2C_MEMADD_SIZE_8BIT,
+                                               &data, 1U, MPU6050_I2C_TIMEOUT_MS);
+  s_imu.debug.last_error = (uint8_t)status;
+  return status;
 }
 
 static int16_t read_i16_be(const uint8_t *data)
@@ -111,15 +116,20 @@ static uint8_t detect_device(void)
   for (uint32_t i = 0U; i < (sizeof(candidates) / sizeof(candidates[0])); i++)
   {
     s_imu.addr = candidates[i];
+    s_imu.debug.addr = s_imu.addr;
     if (HAL_I2C_IsDeviceReady(s_imu.hi2c, s_imu.addr, 2U, MPU6050_I2C_TIMEOUT_MS) != HAL_OK)
     {
+      s_imu.debug.last_error = (uint8_t)HAL_ERROR;
       continue;
     }
 
-    if ((read_reg(MPU6050_REG_WHO_AM_I, &who_am_i, 1U) == HAL_OK) &&
-        ((who_am_i == 0x68U) || (who_am_i == 0x69U)))
+    if (read_reg(MPU6050_REG_WHO_AM_I, &who_am_i, 1U) == HAL_OK)
     {
-      return 1U;
+      s_imu.debug.who_am_i = who_am_i;
+      if ((who_am_i == 0x68U) || (who_am_i == 0x69U))
+      {
+        return 1U;
+      }
     }
   }
 
@@ -141,6 +151,12 @@ static uint8_t read_raw(int16_t accel[3], int16_t gyro[3])
   gyro[0] = read_i16_be(&data[8]);
   gyro[1] = read_i16_be(&data[10]);
   gyro[2] = read_i16_be(&data[12]);
+  s_imu.debug.read_ok = 1U;
+  for (uint32_t i = 0U; i < 3U; i++)
+  {
+    s_imu.debug.accel_raw[i] = accel[i];
+    s_imu.debug.gyro_raw[i] = gyro[i];
+  }
 
   return 1U;
 }
@@ -179,6 +195,11 @@ static void calibrate(void)
   s_imu.gyro_bias_raw[0] = (int16_t)(gyro_sum[0] / (int32_t)sample_count);
   s_imu.gyro_bias_raw[1] = (int16_t)(gyro_sum[1] / (int32_t)sample_count);
   s_imu.gyro_bias_raw[2] = (int16_t)(gyro_sum[2] / (int32_t)sample_count);
+  for (uint32_t i = 0U; i < 3U; i++)
+  {
+    s_imu.debug.accel_bias_raw[i] = s_imu.accel_bias_raw[i];
+    s_imu.debug.gyro_bias_raw[i] = s_imu.gyro_bias_raw[i];
+  }
 }
 
 uint8_t Mpu6050Imu_Init(I2C_HandleTypeDef *hi2c)
@@ -226,6 +247,7 @@ uint8_t Mpu6050Imu_Init(I2C_HandleTypeDef *hi2c)
   s_imu.attitude.valid = 1U;
   s_imu.last_update_ms = HAL_GetTick();
   s_imu.ready = 1U;
+  s_imu.debug.ready = 1U;
 
   return 1U;
 }
@@ -244,6 +266,7 @@ void Mpu6050Imu_Tick(void)
   if (read_raw(accel_raw, gyro_raw) == 0U)
   {
     s_imu.attitude.valid = 0U;
+    s_imu.debug.read_ok = 0U;
     return;
   }
 
@@ -283,4 +306,14 @@ uint8_t Mpu6050Imu_GetAttitude(Mpu6050Attitude *attitude)
 
   *attitude = s_imu.attitude;
   return s_imu.attitude.valid;
+}
+
+void Mpu6050Imu_GetDebug(Mpu6050Debug *debug)
+{
+  if (debug == NULL)
+  {
+    return;
+  }
+
+  *debug = s_imu.debug;
 }

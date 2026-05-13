@@ -12,6 +12,12 @@
 #define MAVLINK_MSG_ID_ATTITUDE     30U
 #define MAVLINK_MSG_LEN_ATTITUDE    28U
 #define MAVLINK_MSG_CRC_ATTITUDE    39U
+#define MAVLINK_MSG_ID_NAMED_VALUE_FLOAT 251U
+#define MAVLINK_MSG_LEN_NAMED_VALUE_FLOAT 18U
+#define MAVLINK_MSG_CRC_NAMED_VALUE_FLOAT 170U
+#define MAVLINK_MSG_ID_STATUSTEXT   253U
+#define MAVLINK_MSG_LEN_STATUSTEXT  51U
+#define MAVLINK_MSG_CRC_STATUSTEXT  83U
 #define MAVLINK_V2_HEADER_LEN       10U
 #define MAVLINK_V2_CRC_INPUT_LEN    (MAVLINK_V2_HEADER_LEN - 1U)
 
@@ -24,9 +30,11 @@
 
 #define HEARTBEAT_PERIOD_MS       1000U
 #define ATTITUDE_PERIOD_MS         100U
+#define DEBUG_PERIOD_MS           1000U
 #define FAKE_ROLL_RAD              0.174533f
 #define FAKE_PITCH_RAD            -0.087266f
 #define FAKE_YAW_RAD               0.523599f
+#define MAV_SEVERITY_INFO          6U
 
 typedef struct
 {
@@ -54,9 +62,11 @@ static MavlinkConfig s_cfg = {
 static uint8_t s_seq = 0U;
 static uint32_t s_last_heartbeat_ms = 0U;
 static uint32_t s_last_attitude_ms = 0U;
+static uint32_t s_last_debug_ms = 0U;
 static uint8_t s_tx_buffers[4][64];
 static uint8_t s_tx_buffer_index = 0U;
 static uint8_t s_imu_ready = 0U;
+static uint8_t s_boot_status_sent = 0U;
 
 static uint16_t crc_accumulate(uint8_t data, uint16_t crc)
 {
@@ -101,6 +111,25 @@ static void put_float_le(uint8_t *dst, float value)
 
   raw.f = value;
   put_u32_le(dst, raw.u32);
+}
+
+static void put_name_10(uint8_t *dst, const char *name)
+{
+  uint8_t i = 0U;
+
+  for (; i < 10U; i++)
+  {
+    if ((name == NULL) || (name[i] == '\0'))
+    {
+      break;
+    }
+    dst[i] = (uint8_t)name[i];
+  }
+
+  for (; i < 10U; i++)
+  {
+    dst[i] = 0U;
+  }
 }
 
 static uint16_t mavlink_frame_build(uint8_t *out,
@@ -194,6 +223,36 @@ static uint16_t mavlink_attitude_build(uint8_t *out, const MavlinkConfig *cfg,
                              MAVLINK_MSG_CRC_ATTITUDE, cfg);
 }
 
+static uint16_t mavlink_named_value_float_build(uint8_t *out, const MavlinkConfig *cfg,
+                                                const char *name, float value)
+{
+  uint8_t payload[MAVLINK_MSG_LEN_NAMED_VALUE_FLOAT];
+
+  put_u32_le(&payload[0], HAL_GetTick());
+  put_float_le(&payload[4], value);
+  put_name_10(&payload[8], name);
+
+  return mavlink_frame_build(out, MAVLINK_MSG_ID_NAMED_VALUE_FLOAT, payload,
+                             MAVLINK_MSG_LEN_NAMED_VALUE_FLOAT,
+                             MAVLINK_MSG_CRC_NAMED_VALUE_FLOAT, cfg);
+}
+
+static uint16_t mavlink_statustext_build(uint8_t *out, const MavlinkConfig *cfg,
+                                         const char *text)
+{
+  uint8_t payload[MAVLINK_MSG_LEN_STATUSTEXT] = {0};
+
+  payload[0] = MAV_SEVERITY_INFO;
+  for (uint32_t i = 0U; (i < 50U) && (text != NULL) && (text[i] != '\0'); i++)
+  {
+    payload[1U + i] = (uint8_t)text[i];
+  }
+
+  return mavlink_frame_build(out, MAVLINK_MSG_ID_STATUSTEXT, payload,
+                             MAVLINK_MSG_LEN_STATUSTEXT,
+                             MAVLINK_MSG_CRC_STATUSTEXT, cfg);
+}
+
 static uint8_t *mavlink_next_tx_buffer(void)
 {
   uint8_t *buffer = s_tx_buffers[s_tx_buffer_index];
@@ -212,6 +271,8 @@ void MavlinkApp_Init(I2C_HandleTypeDef *hi2c)
   s_seq = 0U;
   s_last_heartbeat_ms = HAL_GetTick() - s_cfg.period_ms;
   s_last_attitude_ms = HAL_GetTick() - ATTITUDE_PERIOD_MS;
+  s_last_debug_ms = HAL_GetTick() - DEBUG_PERIOD_MS;
+  s_boot_status_sent = 0U;
   s_imu_ready = Mpu6050Imu_Init(hi2c);
 }
 
@@ -219,6 +280,7 @@ void MavlinkApp_Tick(void)
 {
   uint32_t now = HAL_GetTick();
   Mpu6050Attitude attitude;
+  Mpu6050Debug imu_debug;
   Mpu6050Attitude *attitude_ptr = NULL;
   uint8_t *tx_buffer;
   uint16_t frame_len;
@@ -235,6 +297,20 @@ void MavlinkApp_Tick(void)
   if (CDC_IsTransmitReady_FS() == 0U)
   {
     return;
+  }
+
+  Mpu6050Imu_GetDebug(&imu_debug);
+
+  if (s_boot_status_sent == 0U)
+  {
+    tx_buffer = mavlink_next_tx_buffer();
+    frame_len = mavlink_statustext_build(tx_buffer, &s_cfg,
+                                         (s_imu_ready != 0U) ? "MPU6050 OK" : "MPU6050 FAIL");
+    if (CDC_Transmit_FS(tx_buffer, frame_len) == USBD_OK)
+    {
+      s_boot_status_sent = 1U;
+      return;
+    }
   }
 
   if ((now - s_last_heartbeat_ms) >= s_cfg.period_ms)
@@ -255,6 +331,61 @@ void MavlinkApp_Tick(void)
     if (CDC_Transmit_FS(tx_buffer, frame_len) == USBD_OK)
     {
       s_last_attitude_ms = now;
+      return;
+    }
+  }
+
+  if ((now - s_last_debug_ms) >= DEBUG_PERIOD_MS)
+  {
+    static uint8_t debug_index = 0U;
+    const char *name = "MPU_RDY";
+    float value = (float)imu_debug.ready;
+
+    switch (debug_index)
+    {
+      case 0U:
+        name = "MPU_RDY";
+        value = (float)imu_debug.ready;
+        break;
+      case 1U:
+        name = "MPU_WHO";
+        value = (float)imu_debug.who_am_i;
+        break;
+      case 2U:
+        name = "MPU_ADDR";
+        value = (float)imu_debug.addr;
+        break;
+      case 3U:
+        name = "MPU_ERR";
+        value = (float)imu_debug.last_error;
+        break;
+      case 4U:
+        name = "ACC_X";
+        value = (float)imu_debug.accel_raw[0];
+        break;
+      case 5U:
+        name = "ACC_Y";
+        value = (float)imu_debug.accel_raw[1];
+        break;
+      case 6U:
+        name = "ACC_Z";
+        value = (float)imu_debug.accel_raw[2];
+        break;
+      case 7U:
+        name = "GYR_Z";
+        value = (float)imu_debug.gyro_raw[2];
+        break;
+      default:
+        debug_index = 0U;
+        return;
+    }
+
+    tx_buffer = mavlink_next_tx_buffer();
+    frame_len = mavlink_named_value_float_build(tx_buffer, &s_cfg, name, value);
+    if (CDC_Transmit_FS(tx_buffer, frame_len) == USBD_OK)
+    {
+      debug_index++;
+      s_last_debug_ms = now;
     }
   }
 }

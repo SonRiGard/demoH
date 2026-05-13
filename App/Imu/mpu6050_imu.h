@@ -21,9 +21,23 @@ typedef struct
   uint8_t valid;
 } Mpu6050Attitude;
 
+typedef struct
+{
+  uint16_t addr;
+  uint8_t who_am_i;
+  uint8_t ready;
+  uint8_t last_error;
+  uint8_t read_ok;
+  int16_t accel_raw[3];
+  int16_t gyro_raw[3];
+  int16_t accel_bias_raw[3];
+  int16_t gyro_bias_raw[3];
+} Mpu6050Debug;
+
 uint8_t Mpu6050Imu_Init(I2C_HandleTypeDef *hi2c);
 void Mpu6050Imu_Tick(void);
 uint8_t Mpu6050Imu_GetAttitude(Mpu6050Attitude *attitude);
+void Mpu6050Imu_GetDebug(Mpu6050Debug *debug);
 
 #ifdef __cplusplus
 }
