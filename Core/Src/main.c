@@ -19,6 +19,9 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "usb_device.h"
+#include "usbd_cdc_if.h"
+
+#include <stdio.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -32,6 +35,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define HEARTBEAT_PERIOD_MS 1000U
 
 /* USER CODE END PD */
 
@@ -59,6 +63,26 @@ static void MX_I2C1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void SendUsbHeartbeat(void)
+{
+  static uint32_t last_heartbeat_ms = 0U;
+  uint32_t now = HAL_GetTick();
+
+  if ((now - last_heartbeat_ms) < HEARTBEAT_PERIOD_MS)
+  {
+    return;
+  }
+
+  last_heartbeat_ms = now;
+
+  char heartbeat_msg[48];
+  int len = snprintf(heartbeat_msg, sizeof(heartbeat_msg),
+                     "HEARTBEAT,%lu\r\n", (unsigned long)now);
+  if (len > 0)
+  {
+    (void)CDC_Transmit_FS((uint8_t *)heartbeat_msg, (uint16_t)len);
+  }
+}
 
 /* USER CODE END 0 */
 
@@ -107,6 +131,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    SendUsbHeartbeat();
+    HAL_Delay(10);
   }
   /* USER CODE END 3 */
 }
