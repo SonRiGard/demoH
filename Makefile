@@ -39,7 +39,7 @@ C_SOURCES =  \
 Core/Src/main.c \
 Core/Src/stm32h7xx_it.c \
 Core/Src/stm32h7xx_hal_msp.c \
-App/Mavlink/mavlink_heartbeat.c \
+App/Mavlink/mavlink_app.c \
 USB_DEVICE/App/usb_device.c \
 USB_DEVICE/App/usbd_desc.c \
 USB_DEVICE/App/usbd_cdc_if.c \

@@ -322,6 +322,23 @@ static int8_t CDC_TransmitCplt_FS(uint8_t *Buf, uint32_t *Len, uint8_t epnum)
 }
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
+uint8_t CDC_IsTransmitReady_FS(void)
+{
+  USBD_CDC_HandleTypeDef *hcdc;
+
+  if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED)
+  {
+    return 0U;
+  }
+
+  hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceFS.pClassData;
+  if ((hcdc == NULL) || (hcdc->TxState != 0U))
+  {
+    return 0U;
+  }
+
+  return 1U;
+}
 
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */
 
