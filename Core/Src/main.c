@@ -95,7 +95,7 @@ int main(void)
   MX_GPIO_Init();
   MX_I2C1_Init();
   MX_USB_DEVICE_Init();
-  MavlinkApp_Init();
+  MavlinkApp_Init(&hi2c1);
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */

@@ -39,6 +39,7 @@ C_SOURCES =  \
 Core/Src/main.c \
 Core/Src/stm32h7xx_it.c \
 Core/Src/stm32h7xx_hal_msp.c \
+App/Imu/mpu6050_imu.c \
 App/Mavlink/mavlink_app.c \
 USB_DEVICE/App/usb_device.c \
 USB_DEVICE/App/usbd_desc.c \
@@ -133,6 +134,7 @@ AS_INCLUDES =
 
 # C includes
 C_INCLUDES =  \
+-IApp/Imu \
 -IApp/Mavlink \
 -IUSB_DEVICE/App \
 -IUSB_DEVICE/Target \

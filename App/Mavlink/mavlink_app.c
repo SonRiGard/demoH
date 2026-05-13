@@ -1,5 +1,7 @@
 #include "mavlink_app.h"
 
+#include "mpu6050_imu.h"
+
 #include "main.h"
 #include "usbd_cdc_if.h"
 
@@ -54,6 +56,7 @@ static uint32_t s_last_heartbeat_ms = 0U;
 static uint32_t s_last_attitude_ms = 0U;
 static uint8_t s_tx_buffers[4][64];
 static uint8_t s_tx_buffer_index = 0U;
+static uint8_t s_imu_ready = 0U;
 
 static uint16_t crc_accumulate(uint8_t data, uint16_t crc)
 {
@@ -155,17 +158,36 @@ static uint16_t mavlink_heartbeat_build(uint8_t *out, const MavlinkConfig *cfg)
                              MAVLINK_MSG_CRC_HEARTBEAT, cfg);
 }
 
-static uint16_t mavlink_attitude_build(uint8_t *out, const MavlinkConfig *cfg)
+static uint16_t mavlink_attitude_build(uint8_t *out, const MavlinkConfig *cfg,
+                                       const Mpu6050Attitude *attitude)
 {
   uint8_t payload[MAVLINK_MSG_LEN_ATTITUDE];
+  uint32_t time_boot_ms = HAL_GetTick();
+  float roll_rad = FAKE_ROLL_RAD;
+  float pitch_rad = FAKE_PITCH_RAD;
+  float yaw_rad = FAKE_YAW_RAD;
+  float roll_rate_rad_s = 0.0f;
+  float pitch_rate_rad_s = 0.0f;
+  float yaw_rate_rad_s = 0.0f;
 
-  put_u32_le(&payload[0], HAL_GetTick());
-  put_float_le(&payload[4], FAKE_ROLL_RAD);
-  put_float_le(&payload[8], FAKE_PITCH_RAD);
-  put_float_le(&payload[12], FAKE_YAW_RAD);
-  put_float_le(&payload[16], 0.0f);
-  put_float_le(&payload[20], 0.0f);
-  put_float_le(&payload[24], 0.0f);
+  if ((attitude != NULL) && (attitude->valid != 0U))
+  {
+    time_boot_ms = attitude->time_boot_ms;
+    roll_rad = attitude->roll_rad;
+    pitch_rad = attitude->pitch_rad;
+    yaw_rad = attitude->yaw_rad;
+    roll_rate_rad_s = attitude->roll_rate_rad_s;
+    pitch_rate_rad_s = attitude->pitch_rate_rad_s;
+    yaw_rate_rad_s = attitude->yaw_rate_rad_s;
+  }
+
+  put_u32_le(&payload[0], time_boot_ms);
+  put_float_le(&payload[4], roll_rad);
+  put_float_le(&payload[8], pitch_rad);
+  put_float_le(&payload[12], yaw_rad);
+  put_float_le(&payload[16], roll_rate_rad_s);
+  put_float_le(&payload[20], pitch_rate_rad_s);
+  put_float_le(&payload[24], yaw_rate_rad_s);
 
   return mavlink_frame_build(out, MAVLINK_MSG_ID_ATTITUDE, payload,
                              MAVLINK_MSG_LEN_ATTITUDE,
@@ -185,18 +207,30 @@ static uint8_t *mavlink_next_tx_buffer(void)
   return buffer;
 }
 
-void MavlinkApp_Init(void)
+void MavlinkApp_Init(I2C_HandleTypeDef *hi2c)
 {
   s_seq = 0U;
   s_last_heartbeat_ms = HAL_GetTick() - s_cfg.period_ms;
   s_last_attitude_ms = HAL_GetTick() - ATTITUDE_PERIOD_MS;
+  s_imu_ready = Mpu6050Imu_Init(hi2c);
 }
 
 void MavlinkApp_Tick(void)
 {
   uint32_t now = HAL_GetTick();
+  Mpu6050Attitude attitude;
+  Mpu6050Attitude *attitude_ptr = NULL;
   uint8_t *tx_buffer;
   uint16_t frame_len;
+
+  if (s_imu_ready != 0U)
+  {
+    Mpu6050Imu_Tick();
+    if (Mpu6050Imu_GetAttitude(&attitude) != 0U)
+    {
+      attitude_ptr = &attitude;
+    }
+  }
 
   if (CDC_IsTransmitReady_FS() == 0U)
   {
@@ -217,7 +251,7 @@ void MavlinkApp_Tick(void)
   if ((now - s_last_attitude_ms) >= ATTITUDE_PERIOD_MS)
   {
     tx_buffer = mavlink_next_tx_buffer();
-    frame_len = mavlink_attitude_build(tx_buffer, &s_cfg);
+    frame_len = mavlink_attitude_build(tx_buffer, &s_cfg, attitude_ptr);
     if (CDC_Transmit_FS(tx_buffer, frame_len) == USBD_OK)
     {
       s_last_attitude_ms = now;
