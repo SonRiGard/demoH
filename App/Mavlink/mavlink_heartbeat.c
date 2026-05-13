@@ -12,6 +12,8 @@
 #define MAVLINK_MSG_ID_HEARTBEAT    0U
 #define MAVLINK_MSG_LEN_HEARTBEAT    9U
 #define MAVLINK_MSG_CRC_HEARTBEAT   50U
+#define MAVLINK_V2_HEADER_LEN       10U
+#define MAVLINK_V2_CRC_INPUT_LEN    (MAVLINK_V2_HEADER_LEN - 1U)
 
 #define MAV_TYPE_GENERIC             0U
 #define MAV_AUTOPILOT_GENERIC        0U
@@ -106,7 +108,11 @@ static uint16_t mavlink_heartbeat_build(uint8_t *out, const MavlinkHeartbeatConf
     out[index++] = payload[i];
   }
 
-  crc = crc_calculate(payload, MAVLINK_MSG_LEN_HEARTBEAT);
+  crc = crc_calculate(&out[1], MAVLINK_V2_CRC_INPUT_LEN);
+  for (uint16_t i = 0U; i < MAVLINK_MSG_LEN_HEARTBEAT; i++)
+  {
+    crc = crc_accumulate(payload[i], crc);
+  }
   crc = crc_accumulate(MAVLINK_MSG_CRC_HEARTBEAT, crc);
 
   out[index++] = (uint8_t)(crc & 0xFFU);
