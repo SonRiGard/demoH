@@ -126,7 +126,8 @@ static uint8_t detect_device(void)
     if (read_reg(MPU6050_REG_WHO_AM_I, &who_am_i, 1U) == HAL_OK)
     {
       s_imu.debug.who_am_i = who_am_i;
-      if ((who_am_i == 0x68U) || (who_am_i == 0x69U))
+      if ((who_am_i == 0x68U) || (who_am_i == 0x69U) ||
+          (who_am_i == 0x70U) || (who_am_i == 0x71U))
       {
         return 1U;
       }
